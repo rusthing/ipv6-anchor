@@ -1,0 +1,31 @@
+[package]
+name = "ipv6-anchor"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["zbz <nnzbz@qq.com>"]
+description = "把本机公网 IPv6 地址锚定到 dynv6 的 AAAA 记录，整个程序就是一个 GET"
+license = "MIT"
+repository = "https://github.com/rusthing/ipv6-anchor"
+readme = "README.md"
+keywords = ["ddns", "ipv6", "dynv6", "dns", "dynamic-dns"]
+categories = ["command-line-utilities", "network-programming"]
+
+# 只打包真正要发出去的文件
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "config.example.toml"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+# 只要 TLS + gzip。不启用 proxy-from-env：请求必须直连，
+# 否则 dynv6 的 ipv6=auto 会把代理地址记进 AAAA
+ureq = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
