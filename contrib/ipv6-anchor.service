@@ -1,0 +1,30 @@
+[Unit]
+Description=ipv6-anchor — 用 dynv6 维护本机 IPv6 DDNS 记录
+Documentation=https://github.com/rusthing/ipv6-anchor
+# 等链路起来（network-online 只保证「网卡配置完成」，
+# IPv6 的 SLAAC 地址可能还要一会儿；程序自己有重试和 300s 循环，起早了也能自愈）
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# 改成你机器上的实际用户
+User=zbz
+Group=zbz
+# 二进制所在目录：程序会在这里找 ipv6-anchor.toml
+WorkingDirectory=/opt/ipv6-anchor
+# 带 - 前缀表示文件不存在也不报错；token 放这里，权限建议 600
+EnvironmentFile=-/etc/ipv6-anchor.env
+ExecStart=/opt/ipv6-anchor/ipv6-anchor
+
+# 程序内部是死循环 + 自己重试，正常不会退出；
+# 这里的 Restart 只兜「进程真的崩了」的情况
+Restart=always
+RestartSec=30
+
+# 日志走 journald，看：journalctl -u ipv6-anchor -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

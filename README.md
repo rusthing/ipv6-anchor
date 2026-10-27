@@ -54,6 +54,47 @@ cron 示例：
 */5 * * * * DYNV6_TOKEN=xxx /usr/local/bin/ipv6-anchor --once --hostname myhost.dynv6.net
 ```
 
+## 日志长什么样
+
+默认（`INFO`）每次检查打几行：结论、连接细节、下次时间。
+
+```
+2026-10-27T22:42:22+08:00  INFO  启动：zbz-ai.dns.army → https://ipv6.dynv6.com（每 300s 检查一次，token Q4LX…(30 字符)）
+2026-10-27T22:42:22+08:00  INFO  本机出口：2409:8a5c:2a9:3d40:4c1f:9a2e:11b7:33d0 → 2a01:4f9:c010:95b::
+2026-10-27T22:42:24+08:00  INFO  已更新：addresses updated
+2026-10-27T22:42:24+08:00  INFO  2409:8a5c:2a9:3d40:4c1f:9a2e:11b7:33d0 → 2a01:4f9:c010:95b::  ·  HTTP 200  ·  1.23s
+2026-10-27T22:42:24+08:00  INFO  下次检查 22:47:24（300s 后）
+```
+
+- **本机出口**：内核为「去 dynv6」选中的源地址，也就是 dynv6 会写进 AAAA 的那个值。做法是 UDP `connect`（只查路由表、不发包）再读 `local_addr()`。链路上有 NAT66 时 dynv6 记的是 NAT 后的地址，这行就不代表实际值了。
+- **耗时**：含 DNS + TCP + TLS + 读响应体，正常几百毫秒到两三秒；持续变大说明到 dynv6 的链路在变差。
+- **`-v` 追加**：被忽略的代理变量、完整 URL（token 已打码）、出口地址、每次重试各自的失败原因。
+
+## 开机自启（systemd）
+
+仓库里带了一份可直接用的单元：[`contrib/ipv6-anchor.service`](contrib/ipv6-anchor.service)。
+
+```bash
+sudo install -Dm 755 target/release/ipv6-anchor /opt/ipv6-anchor/ipv6-anchor
+sudo install -Dm 644 contrib/ipv6-anchor.service /etc/systemd/system/
+sudo install -Dm 600 contrib/ipv6-anchor.env.example /etc/ipv6-anchor.env
+sudo editor /etc/ipv6-anchor.env        # 填 hostname 和 token
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now ipv6-anchor
+journalctl -u ipv6-anchor -f            # 看日志
+```
+
+几个容易踩的点：
+
+- 单元里 `User=` / `WorkingDirectory=` / `ExecStart=` 三处路径要跟机器一致，示例按 `/opt/ipv6-anchor` 写。
+- token 放 `EnvironmentFile`（600 权限），别写进 unit——unit 文件一般 644，谁都能看。
+- **不要同时开 cron**：程序自己就是常驻循环，再加 cron 只会两边抢着更新。
+- 二进制在 `~/opt` 这种家目录下、又不想用 root 的，可以走用户级 systemd：单元放 `~/.config/systemd/user/`，
+  `WorkingDirectory=%h/opt/ipv6-anchor`，然后 `systemctl --user enable --now ipv6-anchor`，
+  并 `sudo loginctl enable-linger $USER`（否则没登录时不会启动）。
+- 开机那一刻 IPv6 的 SLAAC 地址可能还没就绪，第一轮失败没关系——程序每 300s 会自己再来一次。
+
 ## 三个使用前提
 
 | 前提 | 说明 |
@@ -98,8 +139,12 @@ curl -6 -s  --noproxy '*' https://ipv6.dynv6.com/api/update          # 期望 40
 src/
 ├── main.rs     入口、常驻循环
 ├── config.rs   CLI / 环境变量 / TOML 合并与校验
-├── dynv6.rs    构造 URL、请求、响应判定、重试
+├── dynv6.rs    构造 URL、请求、响应判定、重试、出口地址探测
 └── logger.rs   带时间戳的日志
+
+contrib/
+├── ipv6-anchor.service        systemd 单元
+└── ipv6-anchor.env.example    EnvironmentFile 模板
 ```
 
 dynv6 接口文档：<https://dynv6.com/docs/apis>

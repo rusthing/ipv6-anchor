@@ -1,6 +1,6 @@
 [package]
 name = "ipv6-anchor"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["zbz <nnzbz@qq.com>"]
@@ -12,7 +12,7 @@ keywords = ["ddns", "ipv6", "dynv6", "dns", "dynamic-dns"]
 categories = ["command-line-utilities", "network-programming"]
 
 # 只打包真正要发出去的文件
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE", "config.example.toml"]
+include = ["src/**", "contrib/**", "Cargo.toml", "README.md", "LICENSE", "config.example.toml"]
 
 [dependencies]
 anyhow = "1"

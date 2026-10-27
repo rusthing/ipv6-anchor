@@ -55,6 +55,10 @@ fn run(s: &Settings) -> Result<()> {
         s.interval.as_secs(),
         s.masked_token()
     ));
+    match dynv6::probe_route(&s.endpoint) {
+        Some(r) => logger::info(format!("本机出口：{r}")),
+        None => logger::info("本机出口：未知（没有可用的 IPv6 路由？）"),
+    }
 
     let mut failures: u32 = 0;
     loop {
@@ -65,13 +69,19 @@ fn run(s: &Settings) -> Result<()> {
                 logger::error(format!("本轮失败（连续 {failures} 次）：{e:#}"));
             }
         }
-        logger::debug(format!("{}s 后再次检查", s.interval.as_secs()));
+        let next = chrono::Local::now() + chrono::Duration::from_std(s.interval).unwrap_or_default();
+        logger::info(format!(
+            "下次检查 {}（{}s 后）",
+            next.format("%H:%M:%S"),
+            s.interval.as_secs()
+        ));
         thread::sleep(s.interval);
     }
 }
 
 fn tick(s: &Settings) -> Result<()> {
-    let outcome = dynv6::update(s)?;
-    logger::info(outcome.to_string());
+    let report = dynv6::update(s)?;
+    logger::info(report.outcome.to_string());
+    logger::info(report.detail());
     Ok(())
 }

@@ -15,7 +15,8 @@
 
 use anyhow::{anyhow, Result};
 use std::fmt;
-use std::time::Duration;
+use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
+use std::time::{Duration, Instant};
 
 use crate::config::Settings;
 use crate::logger;
@@ -44,6 +45,80 @@ fn proxy_env_vars_present() -> Vec<&'static str> {
         .copied()
         .filter(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
         .collect()
+}
+
+/// 这条连接的两端地址
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub local: IpAddr,
+    pub remote: IpAddr,
+}
+
+impl fmt::Display for Route {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} → {}", self.local, self.remote)
+    }
+}
+
+/// 问内核「去 dynv6 会从哪个地址出去」。
+///
+/// 做法是 UDP `connect`——只查路由表、不发包——然后读 `local_addr()`，
+/// 拿到的就是内核为这个目的地址选中的源地址，和随后的 TCP 连接一致。
+/// 拿不到（域名解析失败、没有 IPv6 路由）就返回 `None`，只影响日志。
+///
+/// 注意这是**本机视角**：链路上若有 NAT66，dynv6 记录的会是 NAT 后的地址。
+pub fn probe_route(endpoint: &str) -> Option<Route> {
+    let (host, port) = split_endpoint(endpoint)?;
+    let remote = (host.as_str(), port)
+        .to_socket_addrs()
+        .ok()?
+        .find(|a| a.is_ipv6())?;
+
+    let bind = if remote.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let sock = UdpSocket::bind(bind).ok()?;
+    sock.connect(remote).ok()?;
+    let local = sock.local_addr().ok()?;
+    Some(Route {
+        local: local.ip(),
+        remote: remote.ip(),
+    })
+}
+
+/// `https://host[:port][/path]` → `(host, port)`
+fn split_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = endpoint.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let authority = rest.split('/').next().filter(|s| !s.is_empty())?;
+    match authority.rsplit_once(':') {
+        Some((host, port)) => Some((host.to_string(), port.parse().ok()?)),
+        None => Some((authority.to_string(), default_port)),
+    }
+}
+
+/// 一轮检查的结果，带够日志需要的上下文
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub outcome: Outcome,
+    pub status: u16,
+    pub elapsed: Duration,
+    pub route: Option<Route>,
+}
+
+impl Report {
+    /// 第二行：两端地址、HTTP 状态、耗时
+    pub fn detail(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(r) = &self.route {
+            parts.push(r.to_string());
+        }
+        parts.push(format!("HTTP {}", self.status));
+        parts.push(format!("{:.2}s", self.elapsed.as_secs_f64()));
+        parts.join("  ·  ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +187,7 @@ pub fn redact(url: &str, token: &str) -> String {
     }
 }
 
-pub fn update(s: &Settings) -> Result<Outcome> {
+pub fn update(s: &Settings) -> Result<Report> {
     let proxies = proxy_env_vars_present();
     if !proxies.is_empty() {
         logger::debug(format!(
@@ -120,6 +195,13 @@ pub fn update(s: &Settings) -> Result<Outcome> {
             proxies.join(", ")
         ));
     }
+
+    // 只查路由表，不发包；拿不到就算了，不影响请求本身
+    let route = probe_route(&s.endpoint);
+    logger::debug(format!(
+        "出口 {}",
+        route.map_or_else(|| "（未知）".to_string(), |r| r.to_string())
+    ));
 
     let agent = ureq::Agent::config_builder()
         // 非 2xx 也当正常响应，好把 dynv6 的错误正文读出来
@@ -142,7 +224,14 @@ pub fn update(s: &Settings) -> Result<Outcome> {
             std::thread::sleep(backoff);
         }
         match once(&agent, &url) {
-            Ok(o) => return Ok(o),
+            Ok(reply) => {
+                return Ok(Report {
+                    outcome: reply.outcome,
+                    status: reply.status,
+                    elapsed: reply.elapsed,
+                    route,
+                });
+            }
             Err(e) => {
                 logger::debug(format!("第 {} 次失败：{e:#}", attempt + 1));
                 if is_fatal(&e) {
@@ -172,19 +261,32 @@ fn describe(e: &ureq::Error) -> String {
     format!("{e}")
 }
 
-fn once(agent: &ureq::Agent, url: &str) -> Result<Outcome> {
+/// 单次请求的结果（还没拼上出口地址）
+struct Reply {
+    outcome: Outcome,
+    status: u16,
+    elapsed: Duration,
+}
+
+fn once(agent: &ureq::Agent, url: &str) -> Result<Reply> {
+    let started = Instant::now();
     let mut resp = agent.get(url).call().map_err(|e| anyhow!("{}", describe(&e)))?;
     let status = resp.status().as_u16();
     let body = resp
         .body_mut()
         .read_to_string()
         .map_err(|e| anyhow!("读取响应失败：{e}"))?;
+    let elapsed = started.elapsed();
     let text = body.trim().to_string();
 
     if !(200..300).contains(&status) {
         return Err(StatusError { status, body: text }.into());
     }
-    Ok(classify(&text))
+    Ok(Reply {
+        outcome: classify(&text),
+        status,
+        elapsed,
+    })
 }
 
 /// dynv6 用纯文本回话：`addresses updated` / `addresses unchanged`
@@ -290,5 +392,23 @@ mod tests {
     fn other_io_error_passes_through() {
         let e = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
         assert!(!describe(&e).contains("TLS 握手阶段"));
+    }
+
+    #[test]
+    fn endpoint_is_split() {
+        assert_eq!(
+            split_endpoint("https://ipv6.dynv6.com").unwrap(),
+            ("ipv6.dynv6.com".to_string(), 443)
+        );
+        assert_eq!(
+            split_endpoint("https://ipv6.dynv6.com/api/update").unwrap(),
+            ("ipv6.dynv6.com".to_string(), 443)
+        );
+        assert_eq!(
+            split_endpoint("http://127.0.0.1:18080").unwrap(),
+            ("127.0.0.1".to_string(), 18080)
+        );
+        assert!(split_endpoint("ftp://x").is_none());
+        assert!(split_endpoint("ipv6.dynv6.com").is_none());
     }
 }
