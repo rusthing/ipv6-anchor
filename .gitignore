@@ -3,3 +3,4 @@ config.toml
 ipv6-anchor.toml
 *.state.json
 .DS_Store
+Cargo.lock
