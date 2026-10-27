@@ -22,6 +22,30 @@ use crate::logger;
 
 const MAX_ATTEMPTS: u32 = 3;
 
+/// 会被 ureq 自动读取的代理环境变量。
+///
+/// ureq 3.5 的 `Config::default()` 里写死了 `proxy: Proxy::try_from_env()`，
+/// 已经没有 `proxy-from-env` 这个特性开关了——光靠 `ureq = "3"` 是关不掉的。
+/// 走代理的后果不是「请求失败」而是「静默写错」：dynv6 的 `ipv6=auto` 记下的是
+/// 代理出口的地址，本机的 AAAA 永远不更新。所以必须显式 `.proxy(None)`。
+const PROXY_ENV_VARS: [&str; 6] = [
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
+
+/// 当前环境里设置了哪些代理变量（只用于日志提示，不参与决策）
+fn proxy_env_vars_present() -> Vec<&'static str> {
+    PROXY_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Updated(String),
@@ -89,11 +113,21 @@ pub fn redact(url: &str, token: &str) -> String {
 }
 
 pub fn update(s: &Settings) -> Result<Outcome> {
+    let proxies = proxy_env_vars_present();
+    if !proxies.is_empty() {
+        logger::debug(format!(
+            "已忽略代理环境变量：{}（必须直连，否则 AAAA 会写成代理出口地址）",
+            proxies.join(", ")
+        ));
+    }
+
     let agent = ureq::Agent::config_builder()
         // 非 2xx 也当正常响应，好把 dynv6 的错误正文读出来
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(15)))
         .user_agent(concat!("ipv6-anchor/", env!("CARGO_PKG_VERSION")))
+        // 覆盖 Config::default() 里的 Proxy::try_from_env()，强制直连
+        .proxy(None)
         .build()
         .into();
 
@@ -110,6 +144,7 @@ pub fn update(s: &Settings) -> Result<Outcome> {
         match once(&agent, &url) {
             Ok(o) => return Ok(o),
             Err(e) => {
+                logger::debug(format!("第 {} 次失败：{e:#}", attempt + 1));
                 if is_fatal(&e) {
                     return Err(e);
                 }
@@ -122,8 +157,23 @@ pub fn update(s: &Settings) -> Result<Outcome> {
     )))
 }
 
+/// 把 ureq 的错误翻成人话。
+///
+/// TLS 握手阶段被对端掐断时，ureq 只会吐出 `io: unexpected end of file`，
+/// 光看这句分不清是代理拦截、IPv6 链路不通还是对端故障，所以补一句提示。
+fn describe(e: &ureq::Error) -> String {
+    if let ureq::Error::Io(io) = e {
+        if io.kind() == std::io::ErrorKind::UnexpectedEof {
+            return format!(
+                "{io}（连接在 TLS 握手阶段被对端关闭：常见于代理拦截 / 无 IPv6 出口 / 中间设备重置）"
+            );
+        }
+    }
+    format!("{e}")
+}
+
 fn once(agent: &ureq::Agent, url: &str) -> Result<Outcome> {
-    let mut resp = agent.get(url).call().map_err(|e| anyhow!("{e}"))?;
+    let mut resp = agent.get(url).call().map_err(|e| anyhow!("{}", describe(&e)))?;
     let status = resp.status().as_u16();
     let body = resp
         .body_mut()
@@ -226,5 +276,19 @@ mod tests {
     fn encoding() {
         assert_eq!(enc("a.b-c_d"), "a.b-c_d");
         assert_eq!(enc("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn eof_error_gets_a_hint() {
+        let e = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        let msg = describe(&e);
+        assert!(msg.contains("unexpected end of file"), "{msg}");
+        assert!(msg.contains("TLS 握手阶段"), "{msg}");
+    }
+
+    #[test]
+    fn other_io_error_passes_through() {
+        let e = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(!describe(&e).contains("TLS 握手阶段"));
     }
 }

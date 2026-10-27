@@ -1,6 +1,6 @@
 [package]
 name = "ipv6-anchor"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 authors = ["zbz <nnzbz@qq.com>"]
@@ -20,8 +20,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-# 只要 TLS + gzip。不启用 proxy-from-env：请求必须直连，
-# 否则 dynv6 的 ipv6=auto 会把代理地址记进 AAAA
+# 只要 TLS + gzip。请求必须直连（dynv6 的 ipv6=auto 会把「连接源地址」写进 AAAA，
+# 走代理就记成代理出口地址了）。注意 ureq 3.5 已经没有 proxy-from-env 特性开关，
+# Config::default() 无条件调 Proxy::try_from_env()，只能在 dynv6.rs 里显式 .proxy(None)。
 ureq = "3"
 
 [profile.release]

@@ -17,7 +17,7 @@ dynv6 的 `ipv6=auto` 会直接拿**这条连接的源 IPv6 地址**写进 AAAA�
 配套的两个细节，代码里都硬性保证：
 
 1. **端点用 `ipv6.dynv6.com`**——这个域名只有 AAAA 记录（没有 A），连接必然走 IPv6；用 `dynv6.com` 可能落到 IPv4，`auto` 就拿不到 v6 地址了。
-2. **不走环境代理**——ureq 默认不读 `HTTP(S)_PROXY`，这里保持默认。一旦请求经代理，dynv6 看到的是代理 IP，`auto` 就废了。
+2. **不走环境代理**——`ureq` 3.5 的 `Config::default()` 会无条件调 `Proxy::try_from_env()`（`proxy-from-env` 特性开关已经没了，`default-features = false` 也关不掉），所以代码里显式 `.proxy(None)`。一旦请求经代理，dynv6 看到的是代理 IP，`auto` 就废了。
 
 ## 安装
 
@@ -77,7 +77,18 @@ Linux / OpenWrt 上 `use_tempaddr` 默认多为 0，一般不用管。
 | `HTTP 401（invalid authentication token）` | token 不对，或不是这个 zone 的 |
 | `HTTP 404` | hostname 拼错 / 该 zone 不属于这个 token |
 | `已试 3 次` + 连接错误 | 本机没有 IPv6 出口，或被防火墙挡了出站 |
+| `io: unexpected end of file` | TCP 通了但 TLS 握手被对端掐断：本机 IPv6 能出但到 dynv6 的路径有问题（常见是 MTU 黑洞 / 中间设备重置），或 `HTTP(S)_PROXY` 指向的代理把域名 REJECT 了。先按下面「自检」跑一遍 |
 | 日志 `无变化：addresses unchanged` | 正常，dynv6 侧地址没变 |
+
+自检三连（在跑 ipv6-anchor 的那台机器上执行）：
+
+```bash
+env | grep -i proxy                                   # 有输出说明代理变量在干扰
+curl -6 -sv --noproxy '*' https://ipv6.dynv6.com/api/update  2>&1 | head -25
+curl -6 -s  --noproxy '*' https://ipv6.dynv6.com/api/update          # 期望 401 invalid authentication token
+```
+
+`curl` 通而程序不通 → 代理变量问题；两者都不通 → IPv6 链路问题（试 `ping6`/`traceroute6` 到 `ipv6.dynv6.com`，或临时降 MTU 验证）。
 
 退出码：`0` 成功（含"地址没变"）、`1` 请求失败、`2` 配置错误。
 
