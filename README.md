@@ -95,6 +95,85 @@ journalctl -u ipv6-anchor -f            # 看日志
   并 `sudo loginctl enable-linger $USER`（否则没登录时不会启动）。
 - 开机那一刻 IPv6 的 SLAAC 地址可能还没就绪，第一轮失败没关系——程序每 300s 会自己再来一次。
 
+## 开机自启（macOS）
+
+macOS 没有 systemd，对应的是 **launchd**。三种形态，按需求挑一个：
+
+| 形态 | 什么时候起来 | 要 root | 适合 |
+| --- | --- | --- | --- |
+| LaunchAgent（`~/Library/LaunchAgents`） | **登录后** | 不要 | 日常在用、会登录的机器（推荐） |
+| LaunchDaemon（`/Library/LaunchDaemons`） | **开机后**，没人登录也跑 | 要 | 家里常开、重启后停在登录界面的机器 |
+| `.app` + 登录项 | 登录后 | 不要 | 想双击运行 / 签 Developer ID 分发 |
+
+三者的二进制是同一个，区别只在「谁在什么时候把它拉起来」。
+
+### 一键装（LaunchAgent，推荐）
+
+```bash
+./contrib/macos/install.sh --hostname myhost.dynv6.net --token 你的token
+```
+
+脚本干的事：`cargo build --release` → ad-hoc 签名 → 装到 `~/.local/bin/ipv6-anchor` →
+配置写到 `~/.config/ipv6-anchor/config.toml`（600）→ 生成并加载
+`~/Library/LaunchAgents/com.rusthing.ipv6-anchor.plist`。全程不需要 sudo。
+
+```bash
+launchctl print gui/$(id -u)/com.rusthing.ipv6-anchor   # 状态
+tail -f ~/Library/Logs/ipv6-anchor.log                  # 日志
+launchctl kickstart -k gui/$(id -u)/com.rusthing.ipv6-anchor  # 重启
+./contrib/macos/uninstall.sh [--purge]                  # 卸载
+```
+
+不想用脚本就照 plist 模板手抄一遍：
+[`contrib/macos/com.rusthing.ipv6-anchor.plist.in`](contrib/macos/com.rusthing.ipv6-anchor.plist.in)
+里的 `@BIN@` / `@CONFIG@` / `@LOG@` 换成绝对路径，丢进 `~/Library/LaunchAgents/`，然后
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rusthing.ipv6-anchor.plist
+```
+
+### 开机即启（LaunchDaemon）
+
+```bash
+cargo build --release                                  # sudo 不继承 PATH，先自己编
+sudo ./contrib/macos/install.sh --system --skip-build \
+     --hostname myhost.dynv6.net --token 你的token
+```
+
+配置落在 `/Library/Application Support/ipv6-anchor/config.toml`，日志 `/var/log/ipv6-anchor.log`。
+**root 环境没有 `HOME`**，所以 plist 里必须用 `-c 绝对路径` 指配置——脚本已经这么写了，
+手改的话别漏。卸载：`sudo ./contrib/macos/uninstall.sh --system --purge`。
+
+### 打成 .app
+
+```bash
+./contrib/macos/make-app.sh              # 本机架构 → dist/ipv6-anchor.app
+./contrib/macos/make-app.sh --universal  # Intel + Apple Silicon 合一
+```
+
+`LSUIElement = true`，没有 Dock 图标、没有窗口，纯后台跑。两个限制：
+
+- 从 Finder / 登录项启动拿不到命令行参数，只能靠 `~/.config/ipv6-anchor/config.toml`；
+- 它和 LaunchAgent 是**二选一**，同时开就是两个进程抢着更新同一条 AAAA。
+
+### macOS 专有的坑
+
+- **签名**：`Cargo.toml` 里 `strip = true` 会把链接器给 arm64 打的 ad-hoc 签名弄坏，症状是
+  运行即被杀。所以装之前统一 `codesign --force --sign - 二进制`（脚本已含）。自己编自己用，
+  ad-hoc 就够，不需要开发者证书。
+- **Gatekeeper**：本机编译没有 quarantine 属性，直接能跑；从别处下载来的要
+  `xattr -d com.apple.quarantine 文件`，或者正经签 Developer ID + 公证
+  （`codesign --options runtime --timestamp --sign "Developer ID Application: …"` →
+  `xcrun notarytool submit --wait` → `xcrun stapler staple`）。
+- **隐私地址**：见上面「关于 macOS 的隐私地址」。想固定就
+  `sudo sysctl -w net.inet6.ip6.use_tempaddr=0`，写进 `/etc/sysctl.conf` 才能重启后保留
+  （新系统上不保证生效，功能本身不受影响）。
+- **`Bootstrap failed: 5: Input/output error`**：plist 没问题的话，基本是当前 shell 不在
+  Aqua 会话里（ssh、IDE 集成终端、某些 agent 拉起的 shell 都会这样）。换 **Terminal.app**
+  重跑同一条 `launchctl bootstrap` 即可。
+- 睡眠唤醒后进程不会重启，循环接着跑；醒来那一轮会立刻补一次，`interval` 不用调。
+- 别同时配 cron / 别的 LaunchAgent，一个常驻循环就够了。
+
 ## 三个使用前提
 
 | 前提 | 说明 |
@@ -144,7 +223,13 @@ src/
 
 contrib/
 ├── ipv6-anchor.service        systemd 单元
-└── ipv6-anchor.env.example    EnvironmentFile 模板
+├── ipv6-anchor.env.example    EnvironmentFile 模板
+└── macos/
+    ├── install.sh                              编译 + 签名 + 装二进制 + 注册自启
+    ├── uninstall.sh                            卸载
+    ├── make-app.sh                             打成 dist/ipv6-anchor.app
+    ├── com.rusthing.ipv6-anchor.plist.in       LaunchAgent 模板（登录后启动）
+    └── com.rusthing.ipv6-anchor.daemon.plist.in  LaunchDaemon 模板（开机即启）
 ```
 
 dynv6 接口文档：<https://dynv6.com/docs/apis>
