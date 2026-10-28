@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon：开机即启（不需要有人登录），以 root 身份跑。
+
+  和 LaunchAgent 的区别只有一个：登录之前就在跑。
+  开机那一刻 IPv6 的 SLAAC 地址常常还没就绪，第一轮会失败，
+  程序自己每 interval 秒重试，不用管。
+
+  ⚠️ root 环境没有 HOME，所以必须用 -c 传绝对路径的配置，
+  而且 WorkingDirectory 不能写 ~。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BIN@</string>
+        <string>--config</string>
+        <string>@CONFIG@</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@WORKDIR@</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

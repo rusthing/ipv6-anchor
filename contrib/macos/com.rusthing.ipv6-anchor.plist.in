@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent：用户登录后自启，以当前用户身份跑，不需要 root。
+
+  由 contrib/macos/install.sh 把 @…@ 占位符替换成真实路径后写到
+  ~/Library/LaunchAgents/com.rusthing.ipv6-anchor.plist。
+  手改过的话记得 plutil -lint 校验一下。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+
+    <!-- 显式给 -c，免得依赖 cwd；配置里有 hostname / token -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BIN@</string>
+        <string>--config</string>
+        <string>@CONFIG@</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@WORKDIR@</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 正常情况进程是常驻死循环，不会退出；这里只兜「真的崩了」
+         或「配置写错退出码 2」。配合 ThrottleInterval 防止疯狂重启。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <!-- 程序所有日志都走 stderr（logger.rs 用的 eprintln!），
+         stdout 只在 --dry-run 时有输出，两个都指到同一个文件即可 -->
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+
+    <!-- 后台任务：不抢 CPU / IO，也不参与 App Nap 的调度优先级竞争 -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- launchd 给的环境极简，PATH 补一下（比如以后想在里面 exec curl 自检） -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
